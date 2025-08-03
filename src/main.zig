@@ -2,8 +2,8 @@ const std = @import("std");
 const httpz = @import("httpz");
 const Allocator = std.mem.Allocator;
 
-const ADDR = "0.0.0.0";
-const PORT = 8801;
+const ADDR = "127.0.0.1";
+const PORT = 80;
 
 const GO_TO_PARAM_NAME = "to";
 
@@ -58,29 +58,31 @@ fn index(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     res.body =
         \\<!DOCTYPE html>
         \\ <ul>
-        \\ <li><a href="/hello?name=Teg">Querystring + text output</a>
-        \\ <li><a href="/writer/hello/Ghanima">Path parameter + serialize json object</a>
-        \\ <li><a href="/json/hello/Duncan">Path parameter + json writer</a>
-        \\ <li><a href="/metrics">Internal metrics</a>
-        \\ <li><a href="/form_data">Form Data</a>
-        \\ <li><a href="/explicit_write">Explicit Write</a>
+        \\ <li><a href="/go?to=g">google</a>
     ;
 }
 
-fn go(_: *Handler, req: *httpz.Request, res: *httpz.Response) error{ OutOfMemory, NeedToParam }!void {
-    const param = req.params.names;
-    for (param) |name| {
-        std.debug.print("params: {s}", .{name});
-    }
-    const goto = req.params.get(GO_TO_PARAM_NAME) orelse {
+const Redirects = enum {
+    g,
+    yt,
+};
+
+fn go(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const query = try req.query();
+    const goto = query.get(GO_TO_PARAM_NAME) orelse {
         return error.NeedToParam;
     };
 
-    const body = "you are here: ";
-    const bodytext = try req.arena.alloc(u8, body.len + goto.len);
-    std.mem.copyForwards(u8, bodytext[0..body.len], body);
-    std.mem.copyForwards(u8, bodytext[body.len..], goto);
+    // 302 Found "temporary redirect" status code
+    res.status = 302;
 
-    res.status = 200;
-    res.body = bodytext;
+    const redirect = std.meta.stringToEnum(Redirects, goto) orelse {
+        return error.RedirectNotSupported;
+    };
+
+    const redirect_loc = switch (redirect) {
+        .g => "https://google.com",
+        .yt => "https://youtube.com",
+    };
+    res.header("Location", redirect_loc);
 }
