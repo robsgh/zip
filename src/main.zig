@@ -1,11 +1,11 @@
 const std = @import("std");
-const httpz = @import("httpz");
+const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
-const ADDR = "127.0.0.1";
-const PORT = 80;
+const httpz = @import("httpz");
 
-const GO_TO_PARAM_NAME = "to";
+const ADDR = "127.0.0.1";
+const PORT = 8080;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -23,7 +23,7 @@ pub fn main() !void {
     var router = try server.router(.{});
 
     router.get("/", index, .{});
-    router.get("/go", go, .{});
+    router.get("/*", handleShortcut, .{});
 
     std.debug.print("listening on http://{s}:{d}/\n", .{ ADDR, PORT });
 
@@ -50,6 +50,7 @@ const Handler = struct {
             std.enums.tagName(httpz.Method, req.method),
             req.url.path,
         });
+
         try action(self, req, res);
     }
 };
@@ -57,32 +58,59 @@ const Handler = struct {
 fn index(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
     res.body =
         \\<!DOCTYPE html>
+        \\<h1>look mom im famous</h1>
         \\ <ul>
         \\ <li><a href="/go?to=g">google</a>
     ;
 }
 
-const Redirects = enum {
-    g,
-    yt,
+const Shortcut = enum {
+    ddg,
+    hn,
 };
 
-fn go(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
-    const query = try req.query();
-    const goto = query.get(GO_TO_PARAM_NAME) orelse {
-        return error.NeedToParam;
+fn handleShortcut(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const path = req.url.path;
+
+    var buf: [0]u8 = undefined;
+    const unescape_result = try httpz.Url.unescape(res.arena, &buf, path);
+    const unescaped_path = unescape_result.value;
+    defer res.arena.free(unescaped_path);
+
+    var tokens = std.mem.tokenizeScalar(u8, unescaped_path[1..], ' ');
+
+    const shortcut_name = tokens.next() orelse {
+        unreachable;
+    };
+    const shortcut = std.meta.stringToEnum(Shortcut, shortcut_name) orelse {
+        // TODO: tell them they're dumb
+        res.status = 500;
+        return;
     };
 
     // 302 Found "temporary redirect" status code
     res.status = 302;
 
-    const redirect = std.meta.stringToEnum(Redirects, goto) orelse {
-        return error.RedirectNotSupported;
+    const url_string = switch (shortcut) {
+        .ddg => "https://duckduckgo.com/",
+        .hn => "https://news.ycombinator.com/",
     };
 
-    const redirect_loc = switch (redirect) {
-        .g => "https://google.com",
-        .yt => "https://youtube.com",
-    };
-    res.header("Location", redirect_loc);
+    var num_tokens: u32 = 0;
+    var redirect = try std.fmt.allocPrint(res.arena, "{s}", .{url_string});
+    while (tokens.next()) |token| {
+        const tmp = redirect;
+        switch (shortcut) {
+            .ddg => redirect = try std.fmt.allocPrint(res.arena, "{s}{s}{s}", .{
+                redirect,
+                if (num_tokens == 0) "?q=" else "+",
+                token,
+            }),
+            else => redirect = try std.fmt.allocPrint(res.arena, "{s}{s}", .{ redirect, token }),
+        }
+        res.arena.free(tmp);
+        num_tokens += 1;
+    }
+
+    res.header("Location", redirect);
 }
