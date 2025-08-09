@@ -4,12 +4,15 @@ const Allocator = std.mem.Allocator;
 
 const httpz = @import("httpz");
 
+const redirects = @import("redirects.zig");
+
 const ADDR = "127.0.0.1";
 const PORT = 8080;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
+    defer _ = gpa.deinit();
 
     var handler = Handler{};
     var server = try httpz.Server(*Handler).init(allocator, .{
@@ -22,7 +25,6 @@ pub fn main() !void {
 
     var router = try server.router(.{});
 
-    router.get("/", index, .{});
     router.get("/*", handleShortcut, .{});
 
     std.debug.print("listening on http://{s}:{d}/\n", .{ ADDR, PORT });
@@ -55,15 +57,6 @@ const Handler = struct {
     }
 };
 
-fn index(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
-    res.body =
-        \\<!DOCTYPE html>
-        \\<h1>look mom im famous</h1>
-        \\ <ul>
-        \\ <li><a href="/go?to=g">google</a>
-    ;
-}
-
 const Shortcut = enum {
     ddg,
     hn,
@@ -72,10 +65,12 @@ const Shortcut = enum {
 fn handleShortcut(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const path = req.url.path;
 
-    var buf: [0]u8 = undefined;
+    var buf: [256]u8 = [_]u8{0};
     const unescape_result = try httpz.Url.unescape(res.arena, &buf, path);
     const unescaped_path = unescape_result.value;
-    defer res.arena.free(unescaped_path);
+    if (unescape_result.buffered != true) {
+        defer res.arena.free(unescaped_path);
+    }
 
     var tokens = std.mem.tokenizeScalar(u8, unescaped_path[1..], ' ');
 
