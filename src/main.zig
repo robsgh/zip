@@ -65,18 +65,20 @@ const Shortcut = enum {
 fn handleShortcut(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const path = req.url.path;
 
-    var buf: [256]u8 = [_]u8{0};
+    var buf: [8]u8 = [_]u8{undefined} ** 8;
     const unescape_result = try httpz.Url.unescape(res.arena, &buf, path);
-    const unescaped_path = unescape_result.value;
-    if (unescape_result.buffered != true) {
-        defer res.arena.free(unescaped_path);
-    }
+    var unescaped_path = unescape_result.value;
+    defer if (!unescape_result.buffered) {
+        res.arena.free(unescape_result.value);
+    };
 
     var tokens = std.mem.tokenizeScalar(u8, unescaped_path[1..], ' ');
 
     const shortcut_name = tokens.next() orelse {
         unreachable;
     };
+    std.debug.print("path: {s}\tshortcut name: {s}\tbuffered: {}\n", .{ unescaped_path, shortcut_name, unescape_result.buffered });
+
     const shortcut = std.meta.stringToEnum(Shortcut, shortcut_name) orelse {
         // TODO: tell them they're dumb
         res.status = 500;
