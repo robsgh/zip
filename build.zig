@@ -30,6 +30,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const ziglua = b.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // This creates another `std.Build.Step.Compile`, but this one builds an executable
     // rather than a static library.
@@ -39,6 +43,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("httpz", httpz.module("httpz"));
+    exe.root_module.addImport("zlua", ziglua.module("zlua"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

@@ -3,8 +3,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const httpz = @import("httpz");
-
-const redirects = @import("redirects.zig");
+const zlua = @import("zlua");
 
 const ADDR = "127.0.0.1";
 const PORT = 8080;
@@ -26,10 +25,21 @@ pub fn main() !void {
     var router = try server.router(.{});
 
     router.get("/*", handleShortcut, .{});
+    router.get("/", index, .{});
+    router.get("/favicon.ico", favicon, .{});
 
     std.debug.print("listening on http://{s}:{d}/\n", .{ ADDR, PORT });
 
     try server.listen();
+}
+
+fn index(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    res.status = 200;
+    res.body = "do a redirect instead";
+}
+fn favicon(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    res.status = 200;
+    res.body = "";
 }
 
 const Handler = struct {
@@ -57,13 +67,63 @@ const Handler = struct {
     }
 };
 
-const Shortcut = enum {
-    ddg,
-    hn,
-};
+fn getNewLuaState(allocator: Allocator) !*zlua.Lua {
+    const lua = try zlua.Lua.init(allocator);
+    lua.openLibs();
+    return lua;
+}
+
+fn runLuaAndGetURL(lua: *zlua.Lua, allocator: Allocator, shortcut_name: []const u8, tokens: [][]const u8) ![]const u8 {
+    const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd_path);
+    const lua_file = try std.fmt.allocPrintZ(allocator, "{s}/lua/{s}.lua", .{ cwd_path, shortcut_name });
+    defer allocator.free(lua_file);
+
+    lua.doFile(lua_file) catch |err| {
+        const info = switch (err) {
+            error.OutOfMemory => "out of memory",
+            else => lua.toString(-1) catch unreachable,
+        };
+        std.debug.print("ERROR: failed to doFile: {s}\n", .{info});
+        return err;
+    };
+
+    if (try lua.getGlobal("REDIRECT") != zlua.LuaType.function) {
+        return error.RedirectFnGlobalDoesNotExist;
+    }
+
+    lua.createTable(@intCast(tokens.len), 1);
+
+    _ = lua.pushString(shortcut_name);
+    lua.setField(-2, "name");
+
+    for (tokens, 1..) |token, i| {
+        _ = lua.pushString(token);
+        lua.setIndex(-2, @intCast(i));
+    }
+
+    lua.protectedCall(.{
+        .args = 1,
+        .results = 1,
+        .msg_handler = 0,
+    }) catch |err| {
+        const lua_error = lua.toString(-1) catch "no lua error";
+        std.debug.print("ERROR: failed to call REDIRECT global ({}): {s}\n", .{ err, lua_error });
+        return err;
+    };
+
+    const lua_redirect = try lua.toString(-1);
+    std.debug.print("got redirected to {s}\n", .{lua_redirect});
+
+    const redirect = try std.fmt.allocPrint(allocator, "{s}", .{lua_redirect});
+    return redirect;
+}
 
 fn handleShortcut(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const path = req.url.path;
+
+    var lua = try getNewLuaState(res.arena);
+    defer lua.deinit();
 
     var buf: [8]u8 = [_]u8{undefined} ** 8;
     const unescape_result = try httpz.Url.unescape(res.arena, &buf, path);
@@ -72,42 +132,25 @@ fn handleShortcut(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void 
         res.arena.free(unescape_result.value);
     };
 
-    var tokens = std.mem.tokenizeScalar(u8, unescaped_path[1..], ' ');
-
-    const shortcut_name = tokens.next() orelse {
-        unreachable;
-    };
-    std.debug.print("path: {s}\tshortcut name: {s}\tbuffered: {}\n", .{ unescaped_path, shortcut_name, unescape_result.buffered });
-
-    const shortcut = std.meta.stringToEnum(Shortcut, shortcut_name) orelse {
-        // TODO: tell them they're dumb
-        res.status = 500;
+    var token_iter = std.mem.tokenizeScalar(u8, unescaped_path[1..], ' ');
+    const shortcut_name = token_iter.next() orelse {
+        res.body = "<h1>provide a path</h1>";
         return;
     };
 
-    // 302 Found "temporary redirect" status code
-    res.status = 302;
+    var tokens = std.ArrayList([]const u8).init(res.arena);
+    defer tokens.deinit();
 
-    const url_string = switch (shortcut) {
-        .ddg => "https://duckduckgo.com/",
-        .hn => "https://news.ycombinator.com/",
-    };
-
-    var num_tokens: u32 = 0;
-    var redirect = try std.fmt.allocPrint(res.arena, "{s}", .{url_string});
-    while (tokens.next()) |token| {
-        const tmp = redirect;
-        switch (shortcut) {
-            .ddg => redirect = try std.fmt.allocPrint(res.arena, "{s}{s}{s}", .{
-                redirect,
-                if (num_tokens == 0) "?q=" else "+",
-                token,
-            }),
-            else => redirect = try std.fmt.allocPrint(res.arena, "{s}{s}", .{ redirect, token }),
-        }
-        res.arena.free(tmp);
-        num_tokens += 1;
+    var i: usize = 0;
+    while (token_iter.next()) |token| {
+        std.debug.print("token {d}: {s}\n", .{ i, token });
+        try tokens.append(token);
+        i += 1;
     }
 
+    const redirect = try runLuaAndGetURL(lua, res.arena, shortcut_name, tokens.items);
+
+    // 302 Found "temporary redirect" status code
+    res.status = 302;
     res.header("Location", redirect);
 }
